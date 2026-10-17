@@ -1,0 +1,60 @@
+name: Build UID Seccomp Module
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install Android NDK 27.3.13750724
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+          local-cache: true
+
+      - name: Build module
+        id: build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          python tools/uid-seccomp-module/build.py --module-only
+          $version = (Select-String -Path tools/uid-seccomp-module/build.py -Pattern "VERSION = '([^']+)'").Matches.Groups[1].Value
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Upload module ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/${{ steps.build.outputs.version }}/cq-uid-seccomp-${{ steps.build.outputs.version }}.zip
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload SHA256 checksum
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/${{ steps.build.outputs.version }}/cq-uid-seccomp-${{ steps.build.outputs.version }}.zip.sha256
+          archive: false
+          if-no-files-found: error
