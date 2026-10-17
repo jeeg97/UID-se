@@ -1,5 +1,5 @@
 from pathlib import Path
-import argparse, hashlib, json, os, subprocess, zipfile
+import argparse, hashlib, json, os, re, subprocess, zipfile
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -8,8 +8,8 @@ SDK = Path(os.environ.get('ANDROID_SDK_ROOT') or os.environ.get('ANDROID_HOME') 
 NDK = Path(os.environ.get('ANDROID_NDK_HOME') or str(SDK / 'ndk/27.3.13750724')) / 'toolchains/llvm/prebuilt/windows-x86_64'
 HEADER = ROOT / 'third_party/zygisk/zygisk.hpp'
 HEADER_SHA = 'f8d55e8b4f89d418c5941afe62ce6a09ddec1f4afd9a1b0a01eb40a93310dd28'
-VERSION = '0.2.7'
-VERSION_CODE = 9
+VERSION = '0.2.8'
+VERSION_CODE = 10
 DEFAULT_OUTPUT = ROOT / 'build' / VERSION
 
 def main():
@@ -48,6 +48,11 @@ def main():
             target = build / 'module' / path.relative_to(HERE / 'panel')
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
+    page = build / 'module/webroot/index.html'
+    html, count = re.subn(r'(<span id="version">)[^<]*(</span>)',
+                          lambda match: match[1] + VERSION + match[2], page.read_text(encoding='utf-8'))
+    assert count == 1, 'Expected one panel version element'
+    page.write_text(html, encoding='utf-8', newline='\n')
     if args.config:
         (build / 'module/defaults').write_bytes(args.config.read_bytes().replace(b'\r\n', b'\n'))
     (build / 'module/config').write_bytes((build / 'module/defaults').read_bytes())

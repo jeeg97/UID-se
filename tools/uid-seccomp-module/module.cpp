@@ -22,12 +22,27 @@ class UidSeccomp final : public zygisk::ModuleBase {
     bool merged_ = false;
     int companion_ = -1;
 
+    void prepare_companion(bool preserve_fd) {
+        if (companion_ >= 0) return;
+        companion_ = api_->connectCompanion();
+        if (companion_ >= 0 &&
+            (!uid_filter::notification::prepare(companion_, expected_uid_) ||
+             (preserve_fd && !api_->exemptFd(companion_)))) {
+            close(companion_);
+            companion_ = -1;
+        }
+    }
+
     static int intercept_prctl(int option, unsigned long second, unsigned long third,
                                unsigned long fourth, unsigned long fifth) {
         auto& self = *current_;
         if (option == PR_SET_SECCOMP && second == SECCOMP_MODE_FILTER && third && !self.merged_) {
             const int saved_errno = errno;
             try {
+                // This framework call still runs with zygote credentials.
+                // Connect and hand off here so the socket need not survive
+                // the loader's descriptor cleanup between callbacks.
+                self.prepare_companion(false);
                 std::vector<sock_filter> code;
                 const auto rule=self.companion_>=0 ? uid_filter::notification::rule(self.expected_uid_)
                                                   : uid_filter::make_rule(self.expected_uid_,{},true);
@@ -132,11 +147,9 @@ public:
             if (line == package_) { active_ = true; expected_uid_ = args->uid; break; }
         }
         if (active_) {
-            companion_=api_->connectCompanion();
-            if(companion_>=0 && (!uid_filter::notification::prepare(companion_,expected_uid_)||!api_->exemptFd(companion_))) {
-                close(companion_);companion_=-1;
-            }
             prepare_platform_filter();
+            // Only the post-specialization fallback needs a preserved socket.
+            if (!hook_active_) prepare_companion(true);
         }
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
