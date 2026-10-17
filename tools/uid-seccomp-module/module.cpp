@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sstream>
 #include <string>
+#include "notification.h"
 
 class UidSeccomp final : public zygisk::ModuleBase {
     using Prctl = int (*)(int, unsigned long, unsigned long, unsigned long, unsigned long);
@@ -19,6 +20,7 @@ class UidSeccomp final : public zygisk::ModuleBase {
     struct stat runtime_{};
     bool hook_active_ = false;
     bool merged_ = false;
+    int companion_ = -1;
 
     static int intercept_prctl(int option, unsigned long second, unsigned long third,
                                unsigned long fourth, unsigned long fifth) {
@@ -27,7 +29,21 @@ class UidSeccomp final : public zygisk::ModuleBase {
             const int saved_errno = errno;
             try {
                 std::vector<sock_filter> code;
-                if (uid_filter::merge(*reinterpret_cast<const sock_fprog*>(third), uint32_t(self.expected_uid_), code)) {
+                const auto rule=self.companion_>=0 ? uid_filter::notification::rule(self.expected_uid_)
+                                                  : uid_filter::make_rule(self.expected_uid_,{},true);
+                if (uid_filter::merge_rule(*reinterpret_cast<const sock_fprog*>(third), uint32_t(self.expected_uid_), rule, code)) {
+                    if(self.companion_>=0) {
+                        const int listener=uid_filter::notification::install(code);
+                        if(listener>=0) {
+                            uid_filter::notification::send_listener(self.companion_,listener);
+                            close(listener);close(self.companion_);self.companion_=-1;
+                            self.merged_=true;return 0;
+                        }
+                        // A listener failure must never install notification
+                        // actions through prctl without a responding companion.
+                        if(!uid_filter::merge(*reinterpret_cast<const sock_fprog*>(third),uint32_t(self.expected_uid_),code))
+                            return self.original_prctl_(option,second,third,fourth,fifth);
+                    }
                     sock_fprog program{static_cast<unsigned short>(code.size()), code.data()};
                     const int result = self.original_prctl_(option, second,
                         reinterpret_cast<unsigned long>(&program), fourth, fifth);
@@ -115,13 +131,32 @@ public:
         while (std::getline(input, line)) {
             if (line == package_) { active_ = true; expected_uid_ = args->uid; break; }
         }
-        if (active_) prepare_platform_filter();
+        if (active_) {
+            companion_=api_->connectCompanion();
+            if(companion_>=0 && (!uid_filter::notification::prepare(companion_,expected_uid_)||!api_->exemptFd(companion_))) {
+                close(companion_);companion_=-1;
+            }
+            prepare_platform_filter();
+        }
     }
     void postAppSpecialize(const zygisk::AppSpecializeArgs*) override {
         const bool restored = restore_platform_filter();
-        if (active_ && getuid() == uint32_t(expected_uid_) && !merged_) uid_filter::install({}, true);
+        if (active_ && getuid() == uint32_t(expected_uid_) && !merged_) {
+            if(companion_>=0) {
+                const int nnp=prctl(PR_GET_NO_NEW_PRIVS,0,0,0,0);
+                if(nnp>=0&&(nnp||prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)==0)) {
+                    const int listener=uid_filter::notification::install(uid_filter::notification::rule(expected_uid_));
+                    if(listener>=0) {
+                        uid_filter::notification::send_listener(companion_,listener);close(listener);merged_=true;
+                    }
+                }
+            }
+            if(!merged_)uid_filter::install({},true);
+        }
+        if(companion_>=0){close(companion_);companion_=-1;}
         // No callback may reference this library when Zygisk unloads it.
         if (restored) api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
     }
 };
 REGISTER_ZYGISK_MODULE(UidSeccomp)
+REGISTER_ZYGISK_COMPANION(uid_filter::notification::companion)
